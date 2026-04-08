@@ -105,6 +105,8 @@ function startCountdown(roomId) {
   const room = rooms[roomId];
   if (!room) return;
   room.status = 'countdown';
+  // Gera seed para obstáculos sincronizados
+  room.seed = Math.floor(Math.random() * 2147483647) + 1;
   let count = 3;
   io.to(roomId).emit('countdown', { count });
   const iv = setInterval(() => {
@@ -116,10 +118,12 @@ function startCountdown(roomId) {
       clearInterval(iv);
       room.status = 'playing';
       room.startTime = Date.now();
+      room.roundDeadCount = 0; // reset death counter for round
       getPlayers(room).forEach(p => { p.alive = true; p.dist = 0; p.x = 210; });
       io.to(roomId).emit('game_start', {
         mode: room.mode, round: room.currentRound,
-        phase: room.currentPhase, players: buildList(room, null)
+        phase: room.currentPhase, players: buildList(room, null),
+        seed: room.seed
       });
     }
   }, 1000);
@@ -128,49 +132,48 @@ function startCountdown(roomId) {
 // =====================
 // DUELO — FIM DE ROUND
 // =====================
-function checkDuelRound(roomId) {
+function checkDuelRound(roomId, deadSocketId) {
   const room = rooms[roomId];
   if (!room || room.mode !== 'duel' || room.status !== 'playing') return;
   const players = getPlayers(room);
 
-  // Round termina quando todos ficam sem vidas OU um sobreviveu
-  const allOut = players.every(p => !p.alive || p.duelLives <= 0);
-  if (!allOut) return;
-
+  // Round termina imediatamente quando alguém morre
+  // Vencedor é quem está vivo
   const alive = players.filter(p => p.alive);
+  const dead = players.filter(p => !p.alive);
+
+  // Se ambos morreram quase ao mesmo tempo (dentro do mesmo evento), empate
   const winnerId = alive.length === 1 ? alive[0].socketId : null;
+  const winnerNick = winnerId ? room.players[winnerId].nickname : null;
+  const deadNick = dead.length > 0 ? dead.map(p => p.nickname).join(', ') : null;
 
   room.status = 'round_over';
   if (winnerId) room.players[winnerId].roundsWon++;
 
+  const scores = players.map(p => ({
+    socketId: p.socketId, nickname: p.nickname,
+    roundsWon: p.roundsWon, dist: p.dist
+  }));
+
   io.to(roomId).emit('round_over', {
-    round: room.currentRound, winnerId,
-    scores: players.map(p => ({
-      socketId: p.socketId, nickname: p.nickname,
-      roundsWon: p.roundsWon, duelLives: p.duelLives, dist: p.dist
-    }))
+    round: room.currentRound, winnerId, winnerNick, deadNick, scores
   });
 
-  // Melhor de 3 — quem chegou a 2 ganhou
+  // Melhor de 2 — quem chegou a 2 vitórias é campeão
   const champion = players.find(p => p.roundsWon >= 2);
-  if (champion) { setTimeout(() => endMatch(roomId, champion.socketId), 3500); return; }
-
-  if (room.currentRound >= 3) {
-    const sorted = [...players].sort((a, b) => b.roundsWon - a.roundsWon);
-    const win = sorted[0].roundsWon > sorted[1].roundsWon ? sorted[0].socketId : null;
-    setTimeout(() => endMatch(roomId, win), 3500);
+  if (champion) {
+    setTimeout(() => endMatch(roomId, champion.socketId), 4000);
     return;
   }
 
-  // Próximo round
+  // Próximo round — auto restart em 3s
   room.currentRound++;
-  players.forEach(p => { p.duelLives = DUEL_LIVES; p.alive = true; p.ready = false; p.dist = 0; });
+  players.forEach(p => { p.alive = true; p.ready = false; p.dist = 0; });
   setTimeout(() => {
     if (!rooms[roomId]) return;
-    room.status = 'waiting';
-    io.to(roomId).emit('next_round', { round: room.currentRound, players: buildList(room, null) });
+    room.status = 'countdown';
     startCountdown(roomId);
-  }, 4000);
+  }, 3000);
 }
 
 // =====================
@@ -227,39 +230,48 @@ function endMatch(roomId, winnerId) {
 io.on('connection', (socket) => {
   console.log(`[+] ${socket.id}`);
 
-  socket.on('find_match', ({ nickname, character, mode }) => {
-    if (!['duel','campaign'].includes(mode)) return;
-    ['duel','campaign'].forEach(m => { queue[m] = queue[m].filter(p => p.socketId !== socket.id); });
-    tryMatch(mode, { socketId: socket.id, nickname, character });
+  socket.on('find_match', ({ nickname, character, mode, phase, unlockedPhases }) => {
+    if (mode !== 'duel') return; // só duelo
+    ['duel'].forEach(m => { queue[m] = queue[m].filter(p => p.socketId !== socket.id); });
+    tryMatch('duel', { socketId: socket.id, nickname, character, phase: phase||1, unlockedPhases: unlockedPhases||[1] });
   });
 
-  socket.on('create_invite', ({ nickname, character, mode, roomId: clientRoomId }) => {
+  socket.on('create_invite', ({ nickname, character, mode, roomId: clientRoomId, phase }) => {
     const roomId = (clientRoomId && clientRoomId.length === 6 && !rooms[clientRoomId])
       ? clientRoomId : makeRoomId();
     rooms[roomId] = {
-      id: roomId, mode, host: socket.id,
-      players: { [socket.id]: makePlayer({ socketId: socket.id, nickname, character }, 1) },
-      status: 'invite_waiting', currentRound: 1, currentPhase: 1,
+      id: roomId, mode: 'duel', host: socket.id,
+      players: { [socket.id]: makePlayer({ socketId: socket.id, nickname, character }, phase||1) },
+      status: 'invite_waiting', currentRound: 1, currentPhase: phase||1,
       reconnectTimers: {}, pausedBy: null, rematch: {}
     };
     socketRoom[socket.id] = roomId;
-    socket.join(roomId); // entra no room do socket.io
-    socket.emit('invite_created', { roomId, mode });
+    socket.join(roomId);
+    socket.emit('invite_created', { roomId, mode: 'duel', phase: phase||1 });
   });
 
-  socket.on('join_invite', ({ roomId, nickname, character }) => {
+  socket.on('join_invite', ({ roomId, nickname, character, unlockedPhases }) => {
     const room = rooms[roomId];
     if (!room || room.status !== 'invite_waiting') {
       socket.emit('join_error', { message: 'Sala não encontrada ou já iniciada.' }); return;
+    }
+    // Verifica se convidado tem a fase desbloqueada
+    const requiredPhase = room.currentPhase || 1;
+    const guestPhases = unlockedPhases || [1];
+    if (requiredPhase > 1 && !guestPhases.includes(requiredPhase)) {
+      socket.emit('join_error', {
+        message: 'Você não tem a fase ' + requiredPhase + ' desbloqueada!',
+        phaseBlocked: requiredPhase
+      }); return;
     }
     const hostChar = room.players[room.host].character;
     if (hostChar === character) character = character === 0 ? 1 : 0;
     room.players[socket.id] = makePlayer({ socketId: socket.id, nickname, character }, room.currentPhase);
     room.status = 'waiting';
     socketRoom[socket.id] = roomId;
-    socket.join(roomId); // entra no room do socket.io
+    socket.join(roomId);
     [socket.id, room.host].forEach(sid => {
-      io.to(sid).emit('match_found', { roomId, mode: room.mode, players: buildList(room, sid) });
+      io.to(sid).emit('match_found', { roomId, mode: room.mode, phase: room.currentPhase, players: buildList(room, sid) });
     });
   });
 
@@ -300,12 +312,12 @@ io.on('connection', (socket) => {
     player.alive = false;
     player.dist = dist;
     if (room.mode === 'duel') {
-      player.duelLives = Math.max(0, player.duelLives - 1);
+      // Notifica oponente da morte com explosion
       socket.to(roomId).emit('opponent_died', {
-        socketId: socket.id, nickname: player.nickname,
-        dist, duelLives: player.duelLives
+        socketId: socket.id, nickname: player.nickname, dist
       });
-      checkDuelRound(roomId);
+      // Round termina imediatamente
+      checkDuelRound(roomId, socket.id);
     } else {
       player.campaignLives = Math.max(0, player.campaignLives - 1);
       socket.to(roomId).emit('opponent_died', {
