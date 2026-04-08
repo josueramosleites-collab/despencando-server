@@ -234,10 +234,8 @@ io.on('connection', (socket) => {
   });
 
   socket.on('create_invite', ({ nickname, character, mode, roomId: clientRoomId }) => {
-    // Usa o código gerado pelo cliente se válido, senão gera um novo
     const roomId = (clientRoomId && clientRoomId.length === 6 && !rooms[clientRoomId])
-      ? clientRoomId
-      : makeRoomId();
+      ? clientRoomId : makeRoomId();
     rooms[roomId] = {
       id: roomId, mode, host: socket.id,
       players: { [socket.id]: makePlayer({ socketId: socket.id, nickname, character }, 1) },
@@ -245,6 +243,7 @@ io.on('connection', (socket) => {
       reconnectTimers: {}, pausedBy: null, rematch: {}
     };
     socketRoom[socket.id] = roomId;
+    socket.join(roomId); // entra no room do socket.io
     socket.emit('invite_created', { roomId, mode });
   });
 
@@ -258,6 +257,7 @@ io.on('connection', (socket) => {
     room.players[socket.id] = makePlayer({ socketId: socket.id, nickname, character }, room.currentPhase);
     room.status = 'waiting';
     socketRoom[socket.id] = roomId;
+    socket.join(roomId); // entra no room do socket.io
     [socket.id, room.host].forEach(sid => {
       io.to(sid).emit('match_found', { roomId, mode: room.mode, players: buildList(room, sid) });
     });
@@ -271,6 +271,16 @@ io.on('connection', (socket) => {
     room.players[socket.id].ready = true;
     socket.to(roomId).emit('opponent_ready', { socketId: socket.id });
     if (getPlayers(room).every(p => p.ready)) startCountdown(roomId);
+  });
+
+  // Sincroniza escolha de personagem em tempo real
+  socket.on('character_update', ({ character }) => {
+    const roomId = socketRoom[socket.id];
+    if (!roomId || !rooms[roomId]) return;
+    if (rooms[roomId].players[socket.id]) {
+      rooms[roomId].players[socket.id].character = character;
+    }
+    socket.to(roomId).emit('opponent_character', { character });
   });
 
   socket.on('position_update', ({ x, dist }) => {
