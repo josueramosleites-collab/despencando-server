@@ -233,8 +233,11 @@ io.on('connection', (socket) => {
     tryMatch(mode, { socketId: socket.id, nickname, character });
   });
 
-  socket.on('create_invite', ({ nickname, character, mode }) => {
-    const roomId = makeRoomId();
+  socket.on('create_invite', ({ nickname, character, mode, roomId: clientRoomId }) => {
+    // Usa o código gerado pelo cliente se válido, senão gera um novo
+    const roomId = (clientRoomId && clientRoomId.length === 6 && !rooms[clientRoomId])
+      ? clientRoomId
+      : makeRoomId();
     rooms[roomId] = {
       id: roomId, mode, host: socket.id,
       players: { [socket.id]: makePlayer({ socketId: socket.id, nickname, character }, 1) },
