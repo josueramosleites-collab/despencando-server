@@ -341,7 +341,34 @@ io.on('connection', (socket) => {
     if (players.every(p => !p.alive || p.socketId === socket.id)) advanceCampaign(roomId);
   });
 
-  socket.on('rematch_request', () => {
+  socket.on('return_to_lobby', () => {
+    const roomId = socketRoom[socket.id];
+    if (!roomId || !rooms[roomId]) return;
+    const room = rooms[roomId];
+    const player = room.players[socket.id];
+    if (!player) return;
+    // Reset estado do jogador
+    player.ready = false;
+    player.alive = true;
+    player.dist = 0;
+    // Se ambos voltaram, sala fica em waiting
+    room.status = 'waiting';
+    room.currentRound = 1;
+    getPlayers(room).forEach(p => { p.roundsWon = 0; });
+    // Avisa todos na sala
+    io.to(roomId).emit('lobby_restored', {
+      players: buildList(room, null)
+    });
+  });
+
+  socket.on('leave_lobby', () => {
+    const roomId = socketRoom[socket.id];
+    if (!roomId || !rooms[roomId]) return;
+    const player = rooms[roomId].players[socket.id];
+    socket.to(roomId).emit('opponent_left_lobby', {
+      nickname: player ? player.nickname : '?'
+    });
+  });
     const roomId = socketRoom[socket.id];
     if (!roomId || !rooms[roomId]) return;
     const room = rooms[roomId];
