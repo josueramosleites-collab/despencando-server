@@ -369,6 +369,8 @@ io.on('connection', (socket) => {
       nickname: player ? player.nickname : '?'
     });
   });
+
+  socket.on('rematch_request', () => {
     const roomId = socketRoom[socket.id];
     if (!roomId || !rooms[roomId]) return;
     const room = rooms[roomId];
