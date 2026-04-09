@@ -88,8 +88,13 @@ function tryMatch(mode, newP) {
     const opp = q.splice(existing, 1)[0];
     if (opp.character === newP.character) newP.character = newP.character === 0 ? 1 : 0;
     const room = createRoom(opp, newP, mode);
+    // Ambos entram no room do socket.io para receber broadcasts
+    const oppSocket = io.sockets.sockets.get(opp.socketId);
+    const newSocket = io.sockets.sockets.get(newP.socketId);
+    if (oppSocket) oppSocket.join(room.id);
+    if (newSocket) newSocket.join(room.id);
     [opp.socketId, newP.socketId].forEach(sid => {
-      io.to(sid).emit('match_found', { roomId: room.id, mode, players: buildList(room, sid) });
+      io.to(sid).emit('match_found', { roomId: room.id, mode, phase: room.currentPhase, players: buildList(room, sid) });
     });
     console.log(`[SALA ${mode.toUpperCase()}] ${room.id}: ${opp.nickname} vs ${newP.nickname}`);
   } else {
